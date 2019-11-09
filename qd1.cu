@@ -7,6 +7,7 @@ USAGE
 %qd1 (input file qd1.in required; see qd1.h for the input format)
 *******************************************************************************/
 #include <omp.h>
+#include <mpi.h>
 #include <cuda.h>
 #include <stdio.h>
 #include <math.h>
@@ -18,11 +19,6 @@ USAGE
 
 dim3 dimGrid(NUM_BLOCK, 1, 1);
 dim3 dimBlock(NUM_THREAD, 1, 1);
-
-//cudaMalloc((void**)&dev_psi, sizeof(double)*2*(nx+2));
-//dev_wrk, dev_u, dev_blx0, dev_blx1, dev_bux0, dev_bux1) 
-//cudaMalloc((void**)&dev_al0, sizeof(double)*2);
-//al1
 
 /*
     Allocate array on GPU and copy the values from CPU.
@@ -41,14 +37,14 @@ void host2device(double *d1, double h2[NX + 2][2], int offset, int nx) {
         }
     }
 
-    cudaMemcpy(d1, h1, size, cudaMemcopyHostToDevice);
+    cudaMemcpy(d1, h1, size, cudaMemcpyHostToDevice);
 }
 
 void device2host(double h2[NX + 2][2], double* d1, int offset, int nx) {
     size_t size = sizeof(double) * (nx + 2) * 2;    
     double* h1 = (double *) malloc(size);
 
-    cudaMemcpy(h1, d1, size, cudaMemcopyHostToDevice);
+    cudaMemcpy(h1, d1, size, cudaMemcpyHostToDevice);
 
     int i,j;
     for (i = 1; i <= nx; i++) {
@@ -74,82 +70,90 @@ int main(int argc, char **argv) {
     
     omp_set_num_threads(NUM_DEVICE);
     nx = NX / NUM_DEVICE;
-    #pragma omp parallel private (step) {
+    #pragma omp parallel private(step) 
+    {
         int mpid = omp_get_thread_num();
         int offset = nx * mpid;
 
         cudaSetDevice(mpid % NUM_DEVICE);
 
-        double* dev_psi, dev_wrk, dev_u, dev_blx0, dev_blx1, dev_bux0, dev_bux1, al0, al1;
+        double *dev_psi, *dev_wrk, *dev_u, *dev_blx0, *dev_blx1, *dev_bux0, *dev_bux1, *al0, *al1;
 
         size_t size = sizeof(double) * (nx + 2) * 2;
         
         // Allocate dev_psi.
-        cudaMalloc((double *) &dev_psi, size);
+        cudaMalloc((void **) &dev_psi, size);
         // Copy to dev_psi.
         host2device(dev_psi, psi, offset, nx);
 
         // Allocate dev_wrk.
-        cudaMalloc((double *) &dev_wrk, size);
+        cudaMalloc((void **) &dev_wrk, size);
         // Copy to dev_wrk.
         host2device(dev_wrk, wrk, offset, nx);
 
         // Allocate dev_u.
-        cudaMalloc((double *) &dev_u, size);
+        cudaMalloc((void **) &dev_u, size);
         // Copy to dev_u.
         host2device(dev_u, u, offset, nx);
         
 
         // Allocate al0.
-        cudaMalloc((double *) &al0, 0);
+        cudaMalloc((void **) &al0, sizeof(double));
         // ??????????    
-        cudaMemcpy(al0, al[0], sizeof(double) * 2, cudaMemcopyHostToDevice);
+        cudaMemcpy(al0, al[0], sizeof(double) * 2, cudaMemcpyHostToDevice);
 
         // Allocate al1.
-        cudaMalloc((double *) &al1, 0);
+        cudaMalloc((void **) &al1, sizeof(double));
         // ??????????    
-        cudaMemcpy(al1, al[1], sizeof(double) * 2, cudaMemcopyHostToDevice);
+        cudaMemcpy(al1, al[1], sizeof(double) * 2, cudaMemcpyHostToDevice);
 
 
         // Allocate dev_blx0.
-        cudaMalloc((double *) &dev_blx0, size);
+        cudaMalloc((void **) &dev_blx0, size);
         // Copy to dev_blx0.
         host2device(dev_blx0, blx[0], offset, nx);
 
         // Allocate dev_blx1.
-        cudaMalloc((double *) &dev_blx1, size);
+        cudaMalloc((void **) &dev_blx1, size);
         // Copy to dev_blx1.
         host2device(dev_blx1, blx[1], offset, nx);
 
         // Allocate dev_bux0.
-        cudaMalloc((double *) &dev_bux0, size);
+        cudaMalloc((void **) &dev_bux0, size);
         // Copy to dev_bux0.
         host2device(dev_bux0, bux[0], offset, nx);
 
         // Allocate dev_bux1.
-        cudaMalloc((double *) &dev_bux1, size);
+        cudaMalloc((void **) &dev_bux1, size);
         // Copy to dev_bux1.
         host2device(dev_bux1, bux[1], offset, nx);
         
-        size_t size = NUM_BLOCK * NUM_THREAD * sizeof(float);  //Array memory size
-	    sumHost = (float *)malloc(size);  //  Allocate array on host
-	    cudaMalloc((void **) &sumDev, size);  // Allocate array on device
-	    // Initialize array in device to 0
-	    cudaMemset(sumDev, 0, size);
-
         for (step = 1; step <= NSTEP; step++) {
-		    single_step(); /* Time propagation for one step, DT */
-
+		    single_step(
+			offset, 
+			nx, 
+			dev_psi, 
+			dev_wrk,
+			al0,
+			al1,
+			dev_blx0,
+			dev_blx1,
+			dev_bux0,
+			dev_bux1,
+			dev_u); /* Time propagation for one step, DT */
+		
 		    if (step % NECAL == 0) {
-			    #pragma omp master
-                    calc_energy();
-                #pragma omp barrier
-                // Print ?
+			#pragma omp master 
+                    		calc_energy();
+			#pragma omp master
+				if (myid == 0) printf("%le %le %le %le\n",DT*step,ekin,epot,etot);	
+                	#pragma omp barrier
 		    }
-	    }
+	}
     }
 
-	return 0;
+    MPI_Finalize();    
+    return 0;
 }
 
 /*----------------------------------------------------------------------------*/
@@ -345,7 +349,7 @@ __global__ void gpu_pot_prop(double* psi, double* u) {
 	// 	psi[sx][1]=wi;
 	// }
 
-    int tid = blockIdx.x * blockDim.x + threadId.x; 
+    int tid = blockIdx.x * blockDim.x + threadIdx.x; 
     int sx = tid + 1; 
     double wr, wi; 
 
@@ -359,7 +363,7 @@ __global__ void gpu_pot_prop(double* psi, double* u) {
 
 void pot_prop(int offset, int nx, double* dev_psi, double* dev_u) {
     host2device(dev_psi, psi, offset, nx);
-    gpu_pot_prop <<<dimGrim, dimBlock>>> (dev_psi, dev_u);
+    gpu_pot_prop <<<dimGrid, dimBlock>>> (dev_psi, dev_u);
     device2host(psi, dev_psi, offset, nx);
 
     #pragma omp barrier
@@ -373,7 +377,7 @@ __global__ void gpu_kin_prop(
     double* blx, 
     double* bux) {
 /*----------------------------------------------------------------------------*/
-    int tid = blockIdx.x * blockDim.x + threadId.x; 
+    int tid = blockIdx.x * blockDim.x + threadIdx.x; 
     int sx = tid + 1; 
     double wr, wi; 
 
@@ -403,14 +407,11 @@ void kin_prop(
     double* dev_bux1) {
 /*------------------------------------------------------------------------------
 	Kinetic propagation for t (=0 for DT/2--half; 1 for DT--full) step.
--------------------------------------------------------------------------------*/
-	int sx,s;
-	double wr,wi;
-
+--------------------------------------------------------------------------------*/
 	/* Apply the periodic boundary condition */
-    #pragma omp master
-	    periodic_bc();
-    #pragma omp barrier
+    	#pragma omp master
+		periodic_bc();
+    	#pragma omp barrier
 
 	host2device(dev_psi, psi, offset, nx);
 
@@ -435,13 +436,40 @@ void periodic_bc() {
 	Applies the periodic boundary condition to wave function PSI, by copying
 	the boundary values to the auxiliary array positions at the other ends.
 ------------------------------------------------------------------------------*/
-	int s;
+//	int s;
+//
+//	/* Copy boundary wave function values */
+//	for (s=0; s<=1; s++) {
+//		psi[0][s] = psi[NX][s];
+//		psi[NX+1][s] = psi[1][s];
+//	}
 
-	/* Copy boundary wave function values */
-	for (s=0; s<=1; s++) {
-		psi[0][s] = psi[NX][s];
-		psi[NX+1][s] = psi[1][s];
-	}
+
+	MPI_Request request;
+	MPI_Status status; 
+
+	int x, y;
+	double sendMessage[2], receiveMessage[2];
+	
+	x = (myid + 1) % nproc; 
+	y = (myid - 1 + nproc) % nproc; 
+
+	sendMessage[0] = psi[NX][0];
+	sendMessage[1] = psi[NX][1];
+
+	MPI_Irecv(&receiveMessage, 2, MPI_DOUBLE, x, 666, MPI_COMM_WORLD, &request);
+	MPI_Send(&sendMessage, 2, MPI_DOUBLE, y, 666, MPI_COMM_WORLD);
+	MPI_Wait(&request, &status);
+
+	psi[0][0] = receiveMessage[0]; 
+	psi[0][1] = receiveMessage[1]; 
+
+	MPI_Irecv(&receiveMessage, 2, MPI_DOUBLE, y, 667, MPI_COMM_WORLD, &request);
+	MPI_Send(&sendMessage, 2, MPI_DOUBLE, x, 667, MPI_COMM_WORLD);
+	MPI_Wait(&request, &status);
+
+	psi[NX+1][0] = receiveMessage[0]; 
+	psi[NX+1][1] = receiveMessage[1]; 
 }
 
 /*----------------------------------------------------------------------------*/
@@ -469,7 +497,7 @@ void calc_energy() {
 	for (sx=1; sx<=NX; sx++)
 		ekin += (psi[sx][0]*wrk[sx][0]+psi[sx][1]*wrk[sx][1]);
 	ekin *= dx;
-    MPI_Allreduce(&ekin, &ekin, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    	MPI_Allreduce(&ekin, &ekin, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     
 
 	/* Potential energy */
@@ -477,7 +505,7 @@ void calc_energy() {
 	for (sx=1; sx<=NX; sx++)
 		epot += v[sx]*(psi[sx][0]*psi[sx][0]+psi[sx][1]*psi[sx][1]);
 	epot *= dx;
-    MPI_Allreduce(&epot, &epot, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    	MPI_Allreduce(&epot, &epot, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
     
     /* Total energy */
 	etot = ekin+epot;
