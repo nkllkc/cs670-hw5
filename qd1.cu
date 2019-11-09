@@ -44,7 +44,7 @@ void host2device(double *d1, double h2[NX + 2][2], int offset, int nx) {
     cudaMemcpy(d1, h1, size, cudaMemcopyHostToDevice);
 }
 
-void device2host(doubleh2[NX + 2][2], double* d1, int offset, int nx) {
+void device2host(double h2[NX + 2][2], double* d1, int offset, int nx) {
     size_t size = sizeof(double) * (nx + 2) * 2;    
     double* h1 = (double *) malloc(size);
 
@@ -58,8 +58,15 @@ void device2host(doubleh2[NX + 2][2], double* d1, int offset, int nx) {
     }
 }
 
+static int myid;
+static int nproc;
+
 int main(int argc, char **argv) {
     int nx, step;
+
+    MPI_Init(&argc, &argv); 
+    MPI_Comm_rank(MPI_COMM_WORLD,&myid);
+    MPI_Comm_size(MPI_COMM_WORLD,&nproc); 
 
 	init_param();  /* Read input parameters */
 	init_prop();   /* Initialize the kinetic & potential propagators */
@@ -209,47 +216,58 @@ void init_prop() {
 
 	/* Set up potential propagator */
 	for (i=1; i<=NX; i++) {
-		x = dx*i;
+		x = dx*i + LX * myid;
 		/* Construct the edge potential */
-		if (i==1 || i==NX)
+		if ((myid==0&i==1) || (myid==nproc&&i==NX)){
 			v[i] = EH;
+		}
 		/* Construct the barrier potential */
-		else if (0.5*(LX-BW)<x && x<0.5*(LX+BW))
+		else if (0.5*(LX*nproc-BW)<x && x<0.5*(LX*nproc+BW)){
 			v[i] = BH;
-		else
+		}
+		else{
 			v[i] = 0.0;
+		}
 		/* Half-step potential propagator */
 		u[i][0] = cos(-0.5*DT*v[i]);
 		u[i][1] = sin(-0.5*DT*v[i]);
 	}
 }
 
-/*----------------------------------------------------------------------------*/
 void init_wavefn() {
 /*------------------------------------------------------------------------------
-	Initializes the wave function as a traveling Gaussian wave packet.
-------------------------------------------------------------------------------*/
-	int sx,s;
-	double x,gauss,psisq,norm_fac;
-
-	/* Calculate the the wave function value mesh point-by-point */
-	for (sx=1; sx<=NX; sx++) {
-		x = dx*sx-X0;
-		gauss = exp(-0.25*x*x/(S0*S0));
-		psi[sx][0] = gauss*cos(sqrt(2.0*E0)*x);
-		psi[sx][1] = gauss*sin(sqrt(2.0*E0)*x);
-	}
-
-	/* Normalize the wave function */
-	psisq=0.0;
-	for (sx=1; sx<=NX; sx++)
-		for (s=0; s<2; s++)
-			psisq += psi[sx][s]*psi[sx][s];
-	psisq *= dx;
-	norm_fac = 1.0/sqrt(psisq);
-	for (sx=1; sx<=NX; sx++)
-		for (s=0; s<2; s++)
-			psi[sx][s] *= norm_fac;
+    Initializes the wave function as a traveling Gaussian wave packet.
+s------------------------------------------------------------------------------*/
+    int sx,s;
+    double x,gauss,psisq,norm_fac;
+    
+    /* Calculate the the wave function value mesh point-by-point */
+    for (sx=1; sx<=NX; sx++) {
+        //make it global by adding myid*LX
+        x = myid*LX+dx*sx-X0;
+        gauss = exp(-0.25*x*x/(S0*S0));
+        psi[sx][0] = gauss*cos(sqrt(2.0*E0)*x);
+        psi[sx][1] = gauss*sin(sqrt(2.0*E0)*x);
+    }
+    
+        /* Normalize the wave function */
+    psisq=0.0;
+    for (sx=1; sx<=NX; sx++){
+        for (s=0; s<2; s++){
+            psisq += psi[sx][s]*psi[sx][s];
+        }
+    }
+    MPI_Allreduce(&psisq, &psisq, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD); 
+    
+    psisq *= dx;
+        
+    norm_fac = 1.0/sqrt(psisq);
+    for (sx=1; sx<=NX; sx++){
+        for (s=0; s<2; s++){
+            psi[sx][s] *= norm_fac;
+        }
+    }
 }
 
 /*----------------------------------------------------------------------------*/
@@ -331,12 +349,12 @@ __global__ void gpu_pot_prop(double* psi, double* u) {
     int sx = tid + 1; 
     double wr, wi; 
 
-    for(sx; sx <= NX; sx++){
+    // for(sx; sx <= NX; sx++){
         wr = u[2 * sx + 0] * psi[2 * sx + 0] - u [2 * sx + 1] * psi[2 * sx + 1];
         wi = u[2 * sx + 0] * psi[2 * sx + 1] + u [2 * sx + 1] * psi[2 * sx + 0];
         psi[2 * sx + 0] = wr;
         psi[2 * sx + 1] = wi;
-    }
+    // }
 }
 
 void pot_prop(int offset, int nx, double* dev_psi, double* dev_u) {
@@ -359,7 +377,7 @@ __global__ void gpu_kin_prop(
     int sx = tid + 1; 
     double wr, wi; 
 
-    for (sx = 1; sx <= NX; sx++) {
+    // for (sx = 1; sx <= NX; sx++) {
 		wr = al[0] * psi[2 * sx + 0] - al[1] * psi[2 * sx + 1];
 		wi = al[0] * psi[2 * sx + 1] + al[1] * psi[2 * sx + 0];
 		wr += (blx[2 * sx + 0] * psi[2 * (sx - 1) + 0] - blx[2 * sx + 1] * psi[2 * (sx - 1) + 1]);
@@ -368,7 +386,7 @@ __global__ void gpu_kin_prop(
 		wi += (bux[2 * sx + 0] * psi[2 * (sx + 1) + 1] + bux[2 * sx + 1] * psi[2 * (sx + 1) + 0]);
 		wrk[2 * sx + 0] = wr;
 		wrk[2 * sx + 1] = wi;
-	}
+	// }
 }
 
 void kin_prop(
@@ -378,7 +396,7 @@ void kin_prop(
     double* dev_psi,
     double* dev_wrk,
     double* dev_al0,
-    double* dev_al0,
+    double* dev_al1,
     double* dev_blx0,
     double* dev_blx1,
     double* dev_bux0,
@@ -451,13 +469,16 @@ void calc_energy() {
 	for (sx=1; sx<=NX; sx++)
 		ekin += (psi[sx][0]*wrk[sx][0]+psi[sx][1]*wrk[sx][1]);
 	ekin *= dx;
+    MPI_Allreduce(&ekin, &ekin, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    
 
 	/* Potential energy */
 	epot = 0.0;
 	for (sx=1; sx<=NX; sx++)
 		epot += v[sx]*(psi[sx][0]*psi[sx][0]+psi[sx][1]*psi[sx][1]);
 	epot *= dx;
-
-	/* Total energy */
+    MPI_Allreduce(&epot, &epot, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    
+    /* Total energy */
 	etot = ekin+epot;
 }

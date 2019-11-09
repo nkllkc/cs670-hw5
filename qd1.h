@@ -7,7 +7,6 @@ File qd1.h is a header file for program qd1.c.
 void init_param();
 void init_prop();
 void init_wavefn();
-void single_step();
 void pot_prop();
 void kin_prop(int);
 void periodic_bc();
@@ -56,3 +55,30 @@ double ekin,epot,etot;
 void init_param();
 void init_prop();
 void init_wavefn();
+void host2device(double *d1, double h2[NX + 2][2], int offset, int nx);
+void device2host(double h2[NX + 2][2], double* d1, int offset, int nx);
+void single_step(
+    int offset,
+    int nx, 
+    double* dev_psi, 
+    double* dev_wrk, 
+    double* dev_al0,
+    double* dev_al1,
+    double* dev_blx0,
+    double* dev_blx1,
+    double* dev_bux0,
+    double* dev_bux1,
+    double* dev_u);
+void pot_prop(int offset, int nx, double* dev_psi, double* dev_u);
+void kin_prop(
+    int t,
+    int offset,
+    int nx,
+    double* dev_psi,
+    double* dev_wrk,
+    double* dev_al0,
+    double* dev_al1,
+    double* dev_blx0,
+    double* dev_blx1,
+    double* dev_bux0,
+    double* dev_bux1);
